@@ -2,48 +2,49 @@ const express = require('express');
 const bodyParser = require('body-parser');
 const admin = require('firebase-admin');
 
-// --- 1. FIREBASE SETUP (Updated for Environment Variables) ---
-// Hihingin natin ang SERVICE_ACCOUNT_KEY bilang Environment Variable (JSON string)
+// --- 1. FIREBASE SETUP (USING ENVIRONMENT VARIABLE) ---
 const serviceAccountString = process.env.SERVICE_ACCOUNT_KEY;
 
 let db;
-if (serviceAccountString) {
-    try {
-        const serviceAccount = JSON.parse(serviceAccountString);
-        admin.initializeApp({
-            credential: admin.credential.cert(serviceAccount)
-        });
-        db = admin.firestore();
-        console.log("Firebase initialized successfully from environment variable.");
-    } catch (e) {
-        console.error("ERROR: Failed to parse SERVICE_ACCOUNT_KEY. Check if it's a valid JSON string.");
-        // Sa production environment, maaaring mag-exit, pero para sa local testing, hayaan muna.
-    }
-} else {
-    // Fallback: Kapag nag-test sa local (dapat may serviceAccountKey.json sa local)
-    try {
-        const serviceAccount = require('./serviceAccountKey.json');
-        admin.initializeApp({
-            credential: admin.credential.cert(serviceAccount)
-        });
-        db = admin.firestore();
-        console.log("Firebase initialized successfully from local file.");
-    } catch (e) {
-        console.warn("WARNING: SERVICE_ACCOUNT_KEY not found in ENV and serviceAccountKey.json not found locally. Database operations will fail.");
+try {
+    const serviceAccount = JSON.parse(serviceAccountString);
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount)
+    });
+    db = admin.firestore();
+    console.log("Firebase initialized successfully.");
+} catch (e) {
+    console.error("ERROR: Failed to initialize Firebase. Check SERVICE_ACCOUNT_KEY environment variable. If running locally, ensure serviceAccountKey.json is present.", e);
+    // Para sa local testing, gagamitin ang local file (kung nasa local ka)
+    if (process.env.NODE_ENV !== 'production' && !serviceAccountString) {
+        try {
+            const localServiceAccount = require('./serviceAccountKey.json');
+            admin.initializeApp({
+                credential: admin.credential.cert(localServiceAccount)
+            });
+            db = admin.firestore();
+            console.log("Firebase initialized using local file.");
+        } catch (localError) {
+            console.error("Critical Error: Firebase setup failed both with ENV variable and local file.");
+            process.exit(1);
+        }
+    } else if (!db) {
+        process.exit(1); 
     }
 }
 
+
 const app = express();
-// Gamitin ang port ng host (process.env.PORT) o default sa 3000
-const PORT = process.env.PORT || 3000; 
+const PORT = process.env.PORT || 3000;
 
 app.use(bodyParser.json());
 
-// --- HELPER FUNCTION ---
+// Helper function to get Fees Info data
 const getFeesInfo = async (enrollmentId) => {
-    if (!db) return null; // Check kung initialized ang DB
-
-    const feeSnapshot = await db.collection('fees_information').where('enrollment_id', '==', parseInt(enrollmentId)).limit(1).get();
+    const numericEnrollmentId = parseInt(enrollmentId); // Ensure it's a number for comparison
+    
+    // Kukunin ang Fees Information mula sa Firestore
+    const feeSnapshot = await db.collection('fees_information').where('enrollment_id', '==', numericEnrollmentId).limit(1).get();
 
     if (feeSnapshot.empty) {
         return null;
@@ -51,7 +52,12 @@ const getFeesInfo = async (enrollmentId) => {
 
     const feesData = feeSnapshot.docs[0].data();
     
-    const transactionsSnapshot = await db.collection('payment_transactions').where('enrollment_id', '==', parseInt(enrollmentId)).where('payment_status_id', '==', 2).get(); // Only count COMPLETED
+    // Simpleng simulation ng transactions para sa summary
+    const transactionsSnapshot = await db.collection('payment_transactions')
+                                       .where('enrollment_id', '==', numericEnrollmentId)
+                                       .where('payment_status_id', '==', 2) // Only count COMPLETED payments
+                                       .get();
+    
     let totalPaid = 0;
     transactionsSnapshot.forEach(doc => {
         totalPaid += doc.data().amount;
@@ -66,10 +72,11 @@ const getFeesInfo = async (enrollmentId) => {
         paymentStatus = 'Partial';
     }
 
+
     return {
-        "enrollment_id": parseInt(enrollmentId),
-        "student_id": "S-2023-005",
-        "term": "Fall 2024",
+        "enrollment_id": numericEnrollmentId,
+        "student_id": "S-2023-005", 
+        "term": "Fall 2024", 
         "currency": "PHP",
         "summary": {
             "total_assessed_fees": totalAssessed,
@@ -82,23 +89,16 @@ const getFeesInfo = async (enrollmentId) => {
             "computer_lab_fee": feesData.computer_lab_fee,
             "athletic_fee": feesData.athletic_fee,
             "library_fee": feesData.library_fee,
-            // I-group ang miscellaneous fees base sa binigay mong fields
-            "miscellaneous_fees": feesData.cultural_fee + feesData.internet_fee + feesData.medical_dental_fee + feesData.registration_fee + feesData.school_pub_fee + feesData.id_validation_fee,
+            // Ginagawang Number ang total assessed (para iwas error)
+            "miscellaneous_fees": (totalAssessed - feesData.tuition_fee - feesData.computer_lab_fee - feesData.athletic_fee - feesData.library_fee), 
         }
     };
 };
 
 // --- 2. ENDPOINTS IMPLEMENTATION ---
 
-// Simple check lang kung buhay ang service
-app.get('/', (req, res) => {
-    res.send({ status: "Payment Microservice Running", deployed_on: process.env.RENDER_EXTERNAL_URL ? 'Render' : 'Local' });
-});
-
-
 // GET /enrollment/{id}/fees_information
 app.get('/enrollment/:id/fees_information', async (req, res) => {
-    if (!db) return res.status(500).json({ message: "Database not initialized." });
     try {
         const enrollmentId = req.params.id;
         const feesInfo = await getFeesInfo(enrollmentId);
@@ -116,35 +116,36 @@ app.get('/enrollment/:id/fees_information', async (req, res) => {
 
 // POST /enrollment/{id}/payment_transactions (Initiate Payment)
 app.post('/enrollment/:id/payment_transactions', async (req, res) => {
-    if (!db) return res.status(500).json({ message: "Database not initialized." });
     try {
-        const enrollmentId = req.params.id;
+        const numericEnrollmentId = parseInt(req.params.id);
         const { amount, payment_method, description } = req.body;
 
         if (!amount || !payment_method) {
             return res.status(400).json({ message: "Missing required fields: amount, payment_method" });
         }
         
+        // Simulan ang transaction record sa Firestore
         const newTransactionRef = db.collection('payment_transactions').doc();
-        const transactionId = newTransactionRef.id; 
+        const transactionId = newTransactionRef.id;
 
         const transactionData = {
             transaction_id: transactionId,
-            enrollment_id: parseInt(enrollmentId),
+            enrollment_id: numericEnrollmentId, // Siguraduhin na Number ito
             amount: amount,
             currency: "PHP",
             payment_method: payment_method,
             transaction_ref: null,
-            payment_status_id: 1, // 1: PENDING
+            payment_status_id: 1, // 'PENDING' status ID (Number)
             transaction_timestamp: new Date().toISOString(),
-            description: description,
+            description: description || "Regular Payment",
         };
 
         await newTransactionRef.set(transactionData);
         
+        // Output format (Mocking Payment Gateway)
         res.status(202).json({
             "transaction_id": transactionId,
-            "enrollment_id": parseInt(enrollmentId),
+            "enrollment_id": numericEnrollmentId,
             "status": "PENDING",
             "amount_due": amount,
             "payment_gateway_url": `https://gateway.payment.com/checkout?token=${transactionId}`,
@@ -156,9 +157,8 @@ app.post('/enrollment/:id/payment_transactions', async (req, res) => {
     }
 });
 
-// POST /transactions/{transaction_id} (Update Payment Status)
+// POST /transactions/{transaction_id} (Update Payment Status from Gateway/Webhook)
 app.post('/transactions/:transaction_id', async (req, res) => {
-    if (!db) return res.status(500).json({ message: "Database not initialized." });
     try {
         const transactionId = req.params.transaction_id;
         const { gateway_reference, status_code } = req.body;
@@ -174,27 +174,28 @@ app.post('/transactions/:transaction_id', async (req, res) => {
             return res.status(404).json({ message: 'Transaction not found' });
         }
         
-        let statusId; 
+        let statusId;
         let statusDescription;
 
         if(status_code === 'COMPLETED') {
-            statusId = 2; // 2: COMPLETED
+            statusId = 2; // COMPLETED status ID (Number)
             statusDescription = 'COMPLETED';
+        } else if (status_code === 'FAILED') {
+            statusId = 3; // FAILED status ID (Number)
+            statusDescription = 'FAILED';
         } else {
-            statusId = 3; // 3: FAILED (Example Status)
+            // Iba pang status code
+            statusId = 1; 
             statusDescription = status_code;
         }
 
         await transactionRef.update({
             transaction_ref: gateway_reference,
             payment_status_id: statusId,
-            // Hindi na kailangan i-update ang balance dito, kukunin na lang natin ang updated balance
         });
-        
-        // Simple logic para kunin ang Updated Balance (kailangan ng enrollment_id)
-        const enrollmentId = transactionDoc.data().enrollment_id;
-        const feesInfo = await getFeesInfo(enrollmentId);
-        const updatedBalance = feesInfo ? feesInfo.summary.remaining_balance : 'N/A';
+
+        // Sa totoong system, dapat i-calculate ang bagong balance
+        const updatedBalance = 0.00; // Mocking
 
         res.status(200).json({
             "transaction_id": transactionId,
@@ -210,7 +211,6 @@ app.post('/transactions/:transaction_id', async (req, res) => {
 
 // GET /transactions/{transaction_id}
 app.get('/transactions/:transaction_id', async (req, res) => {
-    if (!db) return res.status(500).json({ message: "Database not initialized." });
     try {
         const transactionId = req.params.transaction_id;
         const transactionDoc = await db.collection('payment_transactions').doc(transactionId).get();
@@ -222,12 +222,9 @@ app.get('/transactions/:transaction_id', async (req, res) => {
         const data = transactionDoc.data();
         
         let statusDescription;
-        switch(data.payment_status_id) {
-            case 1: statusDescription = "PENDING"; break;
-            case 2: statusDescription = "COMPLETED"; break;
-            case 3: statusDescription = "FAILED"; break;
-            default: statusDescription = "UNKNOWN";
-        }
+        if (data.payment_status_id === 1) statusDescription = "PENDING";
+        else if (data.payment_status_id === 2) statusDescription = "COMPLETED";
+        else statusDescription = "FAILED"; // assuming 3 is failed
 
         res.status(200).json({
             "transaction_id": data.transaction_id,
@@ -246,12 +243,11 @@ app.get('/transactions/:transaction_id', async (req, res) => {
 
 // GET /enrollment/{id}/transaction_history
 app.get('/enrollment/:id/transaction_history', async (req, res) => {
-    if (!db) return res.status(500).json({ message: "Database not initialized." });
     try {
-        const enrollmentId = req.params.id;
+        const numericEnrollmentId = parseInt(req.params.id);
         
         const transactionsSnapshot = await db.collection('payment_transactions')
-            .where('enrollment_id', '==', parseInt(enrollmentId))
+            .where('enrollment_id', '==', numericEnrollmentId) // Use numeric ID
             .orderBy('transaction_timestamp', 'desc')
             .get();
 
@@ -262,18 +258,16 @@ app.get('/enrollment/:id/transaction_history', async (req, res) => {
             const data = doc.data();
             
             let statusDescription;
-            switch(data.payment_status_id) {
-                case 1: statusDescription = "PENDING"; break;
-                case 2: statusDescription = "COMPLETED"; break;
-                case 3: statusDescription = "FAILED"; break;
-                default: statusDescription = "UNKNOWN";
-            }
-            
-            if (data.payment_status_id === 2) { // Only count COMPLETED payments
+            if (data.payment_status_id === 1) statusDescription = "PENDING";
+            else if (data.payment_status_id === 2) statusDescription = "COMPLETED";
+            else statusDescription = "FAILED"; 
+
+            // Kung COMPLETED lang ang binabayaran, saka lang siya idadagdag sa totalPaid
+            if (data.payment_status_id === 2) { 
                 totalPaid += data.amount;
             }
-
-            const transactionType = data.description.includes("Final") ? "Final Installment" : "Downpayment";
+            
+            const transactionType = data.description && data.description.includes("Final") ? "Final Installment" : "Downpayment";
 
             transactions.push({
                 "transaction_id": data.transaction_id,
@@ -285,11 +279,16 @@ app.get('/enrollment/:id/transaction_history', async (req, res) => {
         });
 
         if (transactions.length === 0) {
-             return res.status(404).json({ message: 'No transactions found for this enrollment' });
+             // Kung walang transaction, pwede pa ring ibalik ang 200 na may empty list
+             return res.status(200).json({
+                "enrollment_id": numericEnrollmentId,
+                "total_paid": 0,
+                "transactions": []
+            });
         }
 
         res.status(200).json({
-            "enrollment_id": parseInt(enrollmentId),
+            "enrollment_id": numericEnrollmentId,
             "total_paid": totalPaid,
             "transactions": transactions
         });
@@ -302,5 +301,5 @@ app.get('/enrollment/:id/transaction_history', async (req, res) => {
 
 // Start Server
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}. Access URL: ${process.env.RENDER_EXTERNAL_URL || 'http://localhost:' + PORT}`);
+  console.log(`Server running on port ${PORT}`);
 });
