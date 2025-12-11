@@ -213,6 +213,89 @@ app.get('/enrollment/:id/transaction_history', async (req, res) => {
 });
 
 
+// GET /transactions (NEW LIST ENDPOINT)
+app.get('/transactions', async (req, res) => {
+    try {
+        // Kukunin lang ang lahat ng records (walang complex filtering o sorting)
+        const transactionsSnapshot = await db.collection('payment_transactions').get();
+
+        const transactionsList = [];
+        transactionsSnapshot.forEach(doc => {
+            const data = doc.data();
+            
+            const transactionAmount = data.amount && typeof data.amount === 'number' ? data.amount : 0;
+            const statusId = Number(data.payment_status_id) || 0; 
+            
+            transactionsList.push({
+                "transaction_id": data.transaction_id,
+                "enrollment_id": data.enrollment_id || 'N/A',
+                "date": data.transaction_timestamp?.substring(0, 10) || 'N/A',
+                "amount": transactionAmount,
+                "status": getStatusDescription(statusId)
+            });
+        });
+
+        res.status(200).json({
+            "total_transactions_found": transactionsList.length,
+            "transactions": transactionsList.sort((a, b) => new Date(b.date) - new Date(a.date)) // Manual sort
+        });
+    } catch (error) {
+        console.error("CRITICAL ERROR in /transactions list:", error.message, error.stack);
+        res.status(500).json({ message: "Internal Server Error in fetching transaction list." });
+    }
+});
+
+// **Tiyakin na ang getStatusDescription ay nasa code mo**
+const getStatusDescription = (statusId) => {
+    const id = Number(statusId) || 0; 
+    switch (id) {
+        case 1: return "PENDING";
+        case 2: return "COMPLETED";
+        case 3: return "FAILED";
+        default: return "UNKNOWN/DRAFT"; 
+    }
+}
+
+// FINAL LIST ENDPOINT: GET /transactions
+app.get('/transactions', async (req, res) => {
+    try {
+        // Kukunin ang lahat ng records (walang complex filtering o sorting sa database)
+        const transactionsSnapshot = await db.collection('payment_transactions').get();
+
+        const transactionsList = [];
+        transactionsSnapshot.forEach(doc => {
+            const data = doc.data();
+            
+            const transactionAmount = data.amount && typeof data.amount === 'number' ? data.amount : 0;
+            const statusId = Number(data.payment_status_id) || 0; 
+            
+            transactionsList.push({
+                "transaction_id": data.transaction_id,
+                "enrollment_id": data.enrollment_id || 'N/A',
+                "date": data.transaction_timestamp?.substring(0, 10) || '1970-01-01', // Safe date for sorting
+                "amount": transactionAmount,
+                "status": getStatusDescription(statusId)
+            });
+        });
+
+        // Manu-manong i-sort ang transactions sa Node.js
+        transactionsList.sort((a, b) => {
+            const dateA = new Date(a.date);
+            const dateB = new Date(b.date);
+            return dateB.getTime() - dateA.getTime(); // Descending
+        });
+
+        res.status(200).json({
+            "message": "List of all transactions (Replaced failing history endpoint)",
+            "total_transactions_found": transactionsList.length,
+            "transactions": transactionsList
+        });
+    } catch (error) {
+        console.error("CRITICAL ERROR in /transactions list:", error.message, error.stack);
+        res.status(500).json({ message: "Internal Server Error in fetching transaction list." });
+    }
+});
+
 // Start Server
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
