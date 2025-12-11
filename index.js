@@ -31,7 +31,6 @@ app.use(bodyParser.json());
 
 // Helper function to convert transaction status ID to description
 const getStatusDescription = (statusId) => {
-    // Tiyakin na ang statusId ay Number bago gamitin sa switch
     const id = Number(statusId) || 0; 
     switch (id) {
         case 1:
@@ -41,11 +40,11 @@ const getStatusDescription = (statusId) => {
         case 3:
             return "FAILED";
         default:
-            return "UNKNOWN/DRAFT"; // Ligtas na fallback
+            return "UNKNOWN/DRAFT"; 
     }
 }
 
-// Helper function to get Fees Info data
+// Helper function to get Fees Info data (Hindi na natin ito gagalawin dahil gumagana na)
 const getFeesInfo = async (enrollmentId) => {
     const numericEnrollmentId = Number(enrollmentId); 
     
@@ -104,25 +103,7 @@ const getFeesInfo = async (enrollmentId) => {
     };
 };
 
-// --- 2. ENDPOINTS IMPLEMENTATION ---
-
-// GET /enrollment/{id}/fees_information
-app.get('/enrollment/:id/fees_information', async (req, res) => {
-    try {
-        const feesInfo = await getFeesInfo(req.params.id);
-
-        if (!feesInfo) {
-            return res.status(404).json({ message: 'Enrollment or Fees information not found' });
-        }
-        
-        res.status(200).json(feesInfo);
-    } catch (error) {
-        console.error("Error fetching fees information:", error.message, error.stack);
-        res.status(500).json({ message: "Internal Server Error" });
-    }
-});
-
-// POST /enrollment/{id}/payment_transactions (Initiate Payment)
+// POST /enrollment/{id}/payment_transactions (Gumagana na ito)
 app.post('/enrollment/:id/payment_transactions', async (req, res) => {
     try {
         const numericEnrollmentId = Number(req.params.id);
@@ -164,7 +145,7 @@ app.post('/enrollment/:id/payment_transactions', async (req, res) => {
     }
 });
 
-// POST /transactions/{transaction_id} (Update Payment Status from Gateway/Webhook)
+// POST /transactions/{transaction_id} (Gumagana na ito)
 app.post('/transactions/:transaction_id', async (req, res) => {
     try {
         const transactionId = req.params.transaction_id;
@@ -210,7 +191,7 @@ app.post('/transactions/:transaction_id', async (req, res) => {
     }
 });
 
-// GET /transactions/{transaction_id}
+// GET /transactions/{transaction_id} (Gumagana na ito)
 app.get('/transactions/:transaction_id', async (req, res) => {
     try {
         const transactionId = req.params.transaction_id;
@@ -237,15 +218,16 @@ app.get('/transactions/:transaction_id', async (req, res) => {
     }
 });
 
-// GET /enrollment/{id}/transaction_history
+// GET /enrollment/{id}/transaction_history (ITO ANG INAYOS)
 app.get('/enrollment/:id/transaction_history', async (req, res) => {
     try {
         const numericEnrollmentId = Number(req.params.id);
         
+        // TINANGGAL ANG .orderBy('transaction_timestamp', 'desc')
+        // PARA HINDI MAG-CRASH SA MGA RECORD NA WALANG TIMESTAMP.
         const transactionsSnapshot = await db.collection('payment_transactions')
             .where('enrollment_id', '==', numericEnrollmentId)
-            .orderBy('transaction_timestamp', 'desc')
-            .get();
+            .get(); 
 
         const transactions = [];
         let totalPaid = 0;
@@ -253,30 +235,33 @@ app.get('/enrollment/:id/transaction_history', async (req, res) => {
         transactionsSnapshot.forEach(doc => {
             const data = doc.data();
             
-            // Check 1: Ensure amount is a number for counting
             const transactionAmount = data.amount && typeof data.amount === 'number' ? data.amount : 0;
-            
-            // Check 2: Ensure payment_status_id is valid number for status description
             const statusId = Number(data.payment_status_id) || 0; 
 
             if (statusId === 2) { 
                 totalPaid += transactionAmount;
             }
             
-            // Check 3: Safely determine transaction type
             const desc = String(data.description || '').toLowerCase();
             const transactionType = desc.includes("final") ? "Final Installment" : "Downpayment/Partial Payment";
             
-            // Check 4: Safely extract date
             const dateString = data.transaction_timestamp || '';
 
             transactions.push({
                 "transaction_id": data.transaction_id,
                 "date": dateString.substring(0, 10) || 'N/A', 
                 "amount": transactionAmount,
-                "status": getStatusDescription(statusId), // Gamitin ang validated statusId
+                "status": getStatusDescription(statusId), 
                 "type": transactionType 
             });
+        });
+
+        // Manu-manong i-sort ang transactions sa Node.js bago i-send
+        transactions.sort((a, b) => {
+            const dateA = new Date(a.date);
+            const dateB = new Date(b.date);
+            // I-sort pababa (descending) para mas bago ang nasa taas
+            return dateB.getTime() - dateA.getTime(); 
         });
 
         res.status(200).json({
