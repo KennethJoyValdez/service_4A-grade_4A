@@ -2,38 +2,34 @@ const express = require('express');
 const bodyParser = require('body-parser');
 const admin = require('firebase-admin');
 
-// --- 1. FIREBASE SETUP (USING ENVIRONMENT VARIABLE) ---
+// --- 1. FIREBASE SETUP (STRICTLY USING ENVIRONMENT VARIABLE) ---
 const serviceAccountString = process.env.SERVICE_ACCOUNT_KEY;
 
 let db;
 try {
-    // Subukan munang gamitin ang ENV variable (para sa Render)
-    if (serviceAccountString) {
-        const serviceAccount = JSON.parse(serviceAccountString);
-        admin.initializeApp({
-            credential: admin.credential.cert(serviceAccount)
-        });
-        db = admin.firestore();
-        console.log("Firebase initialized successfully using Environment Variable.");
-    } else {
-        // Fallback para sa local testing (kung may serviceAccountKey.json)
-        const localServiceAccount = require('./serviceAccountKey.json');
-        admin.initializeApp({
-            credential: admin.credential.cert(localServiceAccount)
-        });
-        db = admin.firestore();
-        console.log("Firebase initialized successfully using local file.");
+    if (!serviceAccountString) {
+        throw new Error("SERVICE_ACCOUNT_KEY environment variable is missing.");
     }
+    
+    // Ang JSON.parse ang pinakamadalas maging source ng error.
+    const serviceAccount = JSON.parse(serviceAccountString);
+    
+    admin.initializeApp({
+        credential: admin.credential.cert(serviceAccount)
+    });
+    db = admin.firestore();
+    console.log("Firebase initialized successfully using Environment Variable.");
+
 } catch (e) {
     console.error("CRITICAL ERROR: Failed to initialize Firebase Admin SDK.", e.message);
-    // Kapag nag-fail ang initialization, hindi na tayo magpapahintulot na tumakbo ang app
+    // Siguraduhin na mag-e-exit ang app para hindi mag-run ang Express na walang database connection
     process.exit(1); 
 }
 
 const app = express();
-// Gamitin ang port galing sa host (Render) o 3000 (local)
 const PORT = process.env.PORT || 3000; 
 
+// Siguraduhin na gagamitin ang body-parser
 app.use(bodyParser.json());
 
 // Helper function to convert transaction status ID to description
@@ -52,9 +48,10 @@ const getStatusDescription = (statusId) => {
 
 // Helper function to get Fees Info data
 const getFeesInfo = async (enrollmentId) => {
-    const numericEnrollmentId = Number(enrollmentId); // Gamitin ang Number() para mas malakas ang conversion
+    // Tiyakin na Number ang type
+    const numericEnrollmentId = Number(enrollmentId); 
     
-    // 1. Kukunin ang Fees Information
+    // Kukunin ang Fees Information
     const feeSnapshot = await db.collection('fees_information').where('enrollment_id', '==', numericEnrollmentId).limit(1).get();
 
     if (feeSnapshot.empty) {
@@ -63,10 +60,10 @@ const getFeesInfo = async (enrollmentId) => {
 
     const feesData = feeSnapshot.docs[0].data();
     
-    // 2. Kukunin ang COMPLETED transactions
+    // Kukunin ang COMPLETED transactions
     const transactionsSnapshot = await db.collection('payment_transactions')
                                        .where('enrollment_id', '==', numericEnrollmentId)
-                                       .where('payment_status_id', '==', 2) // Only count COMPLETED payments
+                                       .where('payment_status_id', '==', 2) 
                                        .get();
     
     let totalPaid = 0;
@@ -83,13 +80,13 @@ const getFeesInfo = async (enrollmentId) => {
         paymentStatus = 'Partial';
     }
 
-    // Simpleng pag-calculate ng Miscellaneous fees (para tugma sa output format)
     const miscellaneousFees = (feesData.cultural_fee || 0) + 
                               (feesData.internet_fee || 0) + 
                               (feesData.medical_dental_fee || 0) + 
                               (feesData.registration_fee || 0) + 
                               (feesData.school_pub_fee || 0) + 
-                              (feesData.id_validation_fee || 0);
+                              (feesData.id_validation_fee || 0) +
+                              (feesData.id_validation_fee || 0); // May dagdag na field sa fee details
 
     return {
         "enrollment_id": numericEnrollmentId,
@@ -125,7 +122,6 @@ app.get('/enrollment/:id/fees_information', async (req, res) => {
         
         res.status(200).json(feesInfo);
     } catch (error) {
-        // Tiyakin na nagla-log tayo ng error sa console ng Render
         console.error("Error fetching fees information:", error.message, error.stack);
         res.status(500).json({ message: "Internal Server Error" });
     }
@@ -135,25 +131,25 @@ app.get('/enrollment/:id/fees_information', async (req, res) => {
 app.post('/enrollment/:id/payment_transactions', async (req, res) => {
     try {
         const numericEnrollmentId = Number(req.params.id);
-        const amount = Number(req.body.amount); // Siguraduhin na Number ang amount
-        const { payment_method, description } = req.body;
+        // Tiyakin na binabasa ang body
+        const { amount, payment_method, description } = req.body;
+        const numericAmount = Number(amount); 
 
-        if (!amount || !payment_method) {
+        if (!numericAmount || !payment_method) {
             return res.status(400).json({ message: "Missing required fields: amount and payment_method" });
         }
         
-        // Gamitin ang auto-generated ID ng Firestore bilang transaction ID
         const newTransactionRef = db.collection('payment_transactions').doc();
         const transactionId = newTransactionRef.id;
 
         const transactionData = {
             transaction_id: transactionId,
             enrollment_id: numericEnrollmentId, 
-            amount: amount,
+            amount: numericAmount,
             currency: "PHP",
             payment_method: payment_method,
             transaction_ref: null,
-            payment_status_id: 1, // 'PENDING' status ID (Number)
+            payment_status_id: 1, // PENDING (Number)
             transaction_timestamp: new Date().toISOString(),
             description: description || "Payment",
         };
@@ -164,7 +160,7 @@ app.post('/enrollment/:id/payment_transactions', async (req, res) => {
             "transaction_id": transactionId,
             "enrollment_id": numericEnrollmentId,
             "status": getStatusDescription(1),
-            "amount_due": amount,
+            "amount_due": numericAmount,
             "payment_gateway_url": `https://gateway.payment.com/checkout?token=${transactionId}`,
             "timestamp": transactionData.transaction_timestamp
         });
@@ -184,7 +180,6 @@ app.post('/transactions/:transaction_id', async (req, res) => {
             return res.status(400).json({ message: "Missing required fields: gateway_reference, status_code" });
         }
 
-        // Tiyakin na ang ID na ipinasa ay galing sa URL parameter
         const transactionRef = db.collection('payment_transactions').doc(transactionId);
         const transactionDoc = await transactionRef.get();
 
@@ -199,7 +194,7 @@ app.post('/transactions/:transaction_id', async (req, res) => {
         } else if (status_code === 'FAILED') {
             statusId = 3; // FAILED status ID 
         } else {
-            statusId = 1; // Default to PENDING/UNKNOWN
+            statusId = 1; 
         }
 
         await transactionRef.update({
@@ -226,7 +221,6 @@ app.post('/transactions/:transaction_id', async (req, res) => {
 app.get('/transactions/:transaction_id', async (req, res) => {
     try {
         const transactionId = req.params.transaction_id;
-        // Gumamit ng doc() para direktang kunin ang record gamit ang ID
         const transactionDoc = await db.collection('payment_transactions').doc(transactionId).get();
 
         if (!transactionDoc.exists) {
@@ -256,7 +250,7 @@ app.get('/enrollment/:id/transaction_history', async (req, res) => {
         const numericEnrollmentId = Number(req.params.id);
         
         const transactionsSnapshot = await db.collection('payment_transactions')
-            .where('enrollment_id', '==', numericEnrollmentId) // Gamitin ang Number()
+            .where('enrollment_id', '==', numericEnrollmentId)
             .orderBy('transaction_timestamp', 'desc')
             .get();
 
@@ -266,7 +260,6 @@ app.get('/enrollment/:id/transaction_history', async (req, res) => {
         transactionsSnapshot.forEach(doc => {
             const data = doc.data();
             
-            // Only count COMPLETED payments to the total
             if (data.payment_status_id === 2) { 
                 totalPaid += data.amount;
             }
