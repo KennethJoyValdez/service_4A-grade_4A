@@ -1,4 +1,2 @@
-node_modules/
-package-lock.json
-payments.db
-.DS_Store
+node_modules
+serviceAccountKey.json
