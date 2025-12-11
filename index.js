@@ -11,7 +11,7 @@ try {
         throw new Error("SERVICE_ACCOUNT_KEY environment variable is missing.");
     }
     
-    // Ang JSON.parse ang pinakamadalas maging source ng error.
+    // Tiyakin na tama ang JSON parsing
     const serviceAccount = JSON.parse(serviceAccountString);
     
     admin.initializeApp({
@@ -21,15 +21,14 @@ try {
     console.log("Firebase initialized successfully using Environment Variable.");
 
 } catch (e) {
-    console.error("CRITICAL ERROR: Failed to initialize Firebase Admin SDK.", e.message);
-    // Siguraduhin na mag-e-exit ang app para hindi mag-run ang Express na walang database connection
+    console.error("CRITICAL ERROR: Firebase Initialization Failed.", e.message);
     process.exit(1); 
 }
 
 const app = express();
 const PORT = process.env.PORT || 3000; 
 
-// Siguraduhin na gagamitin ang body-parser
+// A. Use body-parser for JSON data
 app.use(bodyParser.json());
 
 // Helper function to convert transaction status ID to description
@@ -48,10 +47,8 @@ const getStatusDescription = (statusId) => {
 
 // Helper function to get Fees Info data
 const getFeesInfo = async (enrollmentId) => {
-    // Tiyakin na Number ang type
     const numericEnrollmentId = Number(enrollmentId); 
     
-    // Kukunin ang Fees Information
     const feeSnapshot = await db.collection('fees_information').where('enrollment_id', '==', numericEnrollmentId).limit(1).get();
 
     if (feeSnapshot.empty) {
@@ -60,7 +57,6 @@ const getFeesInfo = async (enrollmentId) => {
 
     const feesData = feeSnapshot.docs[0].data();
     
-    // Kukunin ang COMPLETED transactions
     const transactionsSnapshot = await db.collection('payment_transactions')
                                        .where('enrollment_id', '==', numericEnrollmentId)
                                        .where('payment_status_id', '==', 2) 
@@ -80,13 +76,13 @@ const getFeesInfo = async (enrollmentId) => {
         paymentStatus = 'Partial';
     }
 
+    // Siguraduhin na may default value ang lahat ng fee fields para iwas undefined error
     const miscellaneousFees = (feesData.cultural_fee || 0) + 
                               (feesData.internet_fee || 0) + 
                               (feesData.medical_dental_fee || 0) + 
                               (feesData.registration_fee || 0) + 
                               (feesData.school_pub_fee || 0) + 
-                              (feesData.id_validation_fee || 0) +
-                              (feesData.id_validation_fee || 0); // May dagdag na field sa fee details
+                              (feesData.id_validation_fee || 0);
 
     return {
         "enrollment_id": numericEnrollmentId,
@@ -131,9 +127,8 @@ app.get('/enrollment/:id/fees_information', async (req, res) => {
 app.post('/enrollment/:id/payment_transactions', async (req, res) => {
     try {
         const numericEnrollmentId = Number(req.params.id);
-        // Tiyakin na binabasa ang body
         const { amount, payment_method, description } = req.body;
-        const numericAmount = Number(amount); 
+        const numericAmount = Number(amount) || 0; // Dagdag na safety check!
 
         if (!numericAmount || !payment_method) {
             return res.status(400).json({ message: "Missing required fields: amount and payment_method" });
@@ -147,11 +142,11 @@ app.post('/enrollment/:id/payment_transactions', async (req, res) => {
             enrollment_id: numericEnrollmentId, 
             amount: numericAmount,
             currency: "PHP",
-            payment_method: payment_method,
-            transaction_ref: null,
+            payment_method: payment_method || null, // Safety check
+            transaction_ref: null, // Ito ay kailangan null/undefined/valid value
             payment_status_id: 1, // PENDING (Number)
             transaction_timestamp: new Date().toISOString(),
-            description: description || "Payment",
+            description: description || null, // Safety check
         };
 
         await newTransactionRef.set(transactionData);
@@ -165,7 +160,8 @@ app.post('/enrollment/:id/payment_transactions', async (req, res) => {
             "timestamp": transactionData.transaction_timestamp
         });
     } catch (error) {
-        console.error("Error initiating transaction:", error.message, error.stack);
+        // Tiyakin na nagla-log ng detalyadong error message
+        console.error("Error initiating transaction (500):", error.message, error.stack);
         res.status(500).json({ message: "Internal Server Error" });
     }
 });
@@ -174,10 +170,12 @@ app.post('/enrollment/:id/payment_transactions', async (req, res) => {
 app.post('/transactions/:transaction_id', async (req, res) => {
     try {
         const transactionId = req.params.transaction_id;
-        const { gateway_reference, status_code } = req.body;
+        // B. Kukunin ang tamang fields
+        const { gateway_reference, status_code } = req.body; 
 
         if (!gateway_reference || !status_code) {
-            return res.status(400).json({ message: "Missing required fields: gateway_reference, status_code" });
+            // Ito ay magre-return ng 400 Bad Request kung wala ang fields
+            return res.status(400).json({ message: "Missing required fields: gateway_reference, status_code" }); 
         }
 
         const transactionRef = db.collection('payment_transactions').doc(transactionId);
@@ -190,9 +188,9 @@ app.post('/transactions/:transaction_id', async (req, res) => {
         let statusId;
 
         if(status_code === 'COMPLETED') {
-            statusId = 2; // COMPLETED status ID 
+            statusId = 2; 
         } else if (status_code === 'FAILED') {
-            statusId = 3; // FAILED status ID 
+            statusId = 3; 
         } else {
             statusId = 1; 
         }
@@ -202,7 +200,6 @@ app.post('/transactions/:transaction_id', async (req, res) => {
             payment_status_id: statusId,
         });
 
-        // Ito ay dapat kalkulahin base sa total fees at transactions (mocked for now)
         const updatedBalance = 0.00; 
 
         res.status(200).json({
